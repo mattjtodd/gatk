@@ -7,6 +7,7 @@ import org.apache.commons.lang3.tuple.Pair;
 import org.broadinstitute.barclay.argparser.*;
 import org.broadinstitute.barclay.help.DocWorkUnit;
 import org.broadinstitute.barclay.help.HelpDoclet;
+import org.broadinstitute.barclay.help.WDLTransforms;
 import org.broadinstitute.barclay.help.WDLWorkUnitHandler;
 import org.broadinstitute.hellbender.engine.FeatureInput;
 import org.broadinstitute.hellbender.engine.GATKPath;
@@ -84,6 +85,32 @@ public class GATKWDLWorkUnitHandler extends WDLWorkUnitHandler {
         return workUnit.getClazz().getSimpleName() + "Inputs.json";
     }
 
+    @Override
+    @SuppressWarnings("unchecked")
+    protected void addCommandLineArgumentBindings(final DocWorkUnit currentWorkUnit, final CommandLineArgumentParser clp) {
+        super.addCommandLineArgumentBindings(currentWorkUnit, clp);
+
+        // add a property so the template can tell which outputs are optional so they can be left out of
+        // the outputs section for the default WDL (which contains only required args)
+        final String REQUIRED_OUTPUTS = "requiredOutputs";
+        final Set<String> requiredOutputs = (Set<String>) currentWorkUnit.getRootMap().getOrDefault(REQUIRED_OUTPUTS, new HashSet<>());
+
+        final Map<String, List<Map<String, Object>>> argMap =
+                (Map<String, List<Map<String, Object>>>) currentWorkUnit.getRootMap().get("arguments");
+        final List<Map<String, Object>> requiredArgs = argMap.get("required");
+
+        final String LONG_OPTION_PREFIX = "--";
+        requiredArgs.stream().forEach(
+                m -> {
+                    // TODO: we really only need OUTPUTs added here (this adds INPUTs as well)
+                    final String actualArgName = (String) m.get("name");
+                    final String nameWithoutPrefix = actualArgName.substring(2);
+                    final String transformedName = LONG_OPTION_PREFIX + WDLTransforms.transformJavaNameToWDLName(nameWithoutPrefix);
+                    requiredOutputs.add(transformedName);
+                });
+        currentWorkUnit.getRootMap().put(REQUIRED_OUTPUTS, requiredOutputs);
+    }
+
     /**
      * Add the named argument {@code argDef}to the property map if applicable.
      * @param currentWorkUnit current work unit
@@ -124,9 +151,14 @@ public class GATKWDLWorkUnitHandler extends WDLWorkUnitHandler {
         final String argType = (String) argBindings.get("type");
         argBindings.put("testValue",
                 getInputValueForTest(
+                        argDef,
                         argType,
                         (String) argBindings.get("defaultValue"))
         );
+        System.out.println(String.format("Arg name: %s original/defaultValue %s testValue %s",
+                argDef.getUnderlyingField().getName(),
+                argBindings.get("defaultValue"),
+                argBindings.get("testValue")));
         return argCategory;
     }
 
@@ -141,6 +173,7 @@ public class GATKWDLWorkUnitHandler extends WDLWorkUnitHandler {
             final String argType = (String) positionalArgs.get("type");
             positionalArgs.put("testValue",
                     getInputValueForTest(
+                            clp.getPositionalArgumentDefinition(),
                             argType,
                             (String) positionalArgs.get("defaultValue"))
             );
@@ -148,29 +181,70 @@ public class GATKWDLWorkUnitHandler extends WDLWorkUnitHandler {
     }
 
     /**
-     * Return a test input value for use in the WDL validation test inputs. If an option has WDL type
-     * File, then we need to provide the name of an actual file that exists so cromwell can localize it.
-     * "dummyWDLTestFileName" is a file that will be created by the test task.
+     * Return a test input value for use in the WDL validation test inputs.
+     *
+     * If an option has WDL type File, then we need to provide the name of an actual file that exists so cromwell
+     * can localize it: "dummyWDLTestFileName" is a file that will be created by the test task.
+     *
+     * @param argDef the ArgumentDefinition for this arg
      * @param wdlType the wdl type for which an input value is needed
-     * @param defaultValue the default value for the argument for which an input value is required
+     * @param defaultWDLValue the default value for the argument for which an input value is required
      * @return a test input value that is either the default value, or the name of an actual test file
      * that will exist at test execution time
      */
-    protected String getInputValueForTest(final String wdlType, final String defaultValue) {
+    protected String getInputValueForTest(final ArgumentDefinition argDef, final String wdlType, final String defaultWDLValue) {
+        final Argument argumentAnnotation = argDef.getUnderlyingField().getAnnotation(Argument.class);
+        final PositionalArguments positionalAnnotation = argDef.getUnderlyingField().getAnnotation(PositionalArguments.class);
+        final boolean isRequired =
+                (argumentAnnotation != null && !argumentAnnotation.optional())
+                || positionalAnnotation != null;
+
+        // first check the wdl type; for File we always want to use the name of the dummy file that is created by
+        // the test process that is used to ensure localization is handled correctly
         if (wdlType.equals("File")) {
             return "\"" + ((GATKWDLDoclet) getDoclet()).getBuildDir() + "/" + dummyWDLTestFileName + "\"";
         } else if (wdlType.equals("Array[File]")) {
             return "[\"" + ((GATKWDLDoclet) getDoclet()).getBuildDir() + "/" + dummyWDLTestFileName + "\"]";
-        } else if (defaultValue.equals("null")) {
-            return "\"\"";
-        } else if (defaultValue.equals("\"\"")) {
-            return defaultValue;
-        } else if (defaultValue.equals("[]")) {
-            return defaultValue;
-        } else if (defaultValue.startsWith("Array")) {
-            return defaultValue;
+        }
+
+        // for other (non-File) types, use the default value and arg def to synthesize a value
+        if (defaultWDLValue.equals("null") || defaultWDLValue.equals("\"\"")) {
+            if (isRequired) {
+                return "\"" + getDefaultValueForType(argDef) + "\"";
+            } else {
+                return "null";
+            }
+        } else if (defaultWDLValue.equals("[]")) {
+            // for required arrays, we need to provide SOME value in the array, and for
+            if (isRequired) {
+                return String.format("[\"%s\"]", getDefaultValueForType(argDef));
+            } else {
+                return "null";
+            }
+        } else if (defaultWDLValue.startsWith("[")) {
+            // the array is already populated with a value (since we didn't execute the "[]" branch above), so
+            // use that value as is since its probably better than anything we'll synthesize
+            return defaultWDLValue;
+        }
+        return "\"" + getDefaultValueForType(argDef) + "\"";
+    }
+
+    /**
+     * Return a value that will satisfy the constructor for argDef's underlying class.
+     * @param argDef
+     * @return a value that will satisfy the constructor for argDef's underlying class.
+     */
+    protected String getDefaultValueForType(final ArgumentDefinition argDef) {
+        final boolean isEnum = argDef.getUnderlyingFieldClass().isEnum();
+        if (isEnum) {
+            // take any enum constant for this enum
+            return argDef.getUnderlyingFieldClass().getEnumConstants()[0].toString();
         } else {
-            return "\"" + defaultValue + "\"";
+            // for floats, ints, etc., get a value that is formatted appropriately by
+            // calling toString() on the value on the underlying object if its not null,
+            // otherwise return a synthetic string
+            final Object fieldDefaultValue = argDef.getArgumentValue();
+            return fieldDefaultValue != null ? fieldDefaultValue.toString() : "syntheticTestValue";
         }
     }
 

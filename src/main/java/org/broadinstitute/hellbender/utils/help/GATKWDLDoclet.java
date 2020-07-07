@@ -78,6 +78,21 @@ public class GATKWDLDoclet extends WDLDoclet {
         return GATK_FREEMARKER_INDEX_TEMPLATE_NAME;
     }
 
+//    @Override
+//    public boolean includeInDocs(final DocumentedFeature documentedFeature, final ClassDoc classDoc, final Class<?> clazz) {
+//        boolean hasRuntimeProperties = clazz.getAnnotation(RuntimeProperties.class) != null;
+//        boolean isCommandLineProgram = clazz.getAnnotation(CommandLineProgramProperties.class) != null;
+//        if (hasRuntimeProperties) {
+//            if (!isCommandLineProgram) {
+//                throw new DocException(String.format(
+//                        "RuntimeProperties can only be applied to classes that are annotated with CommandLineProgramProperties (%s)",
+//                        clazz));
+//            }
+//            return true;
+//        }
+//        return isCommandLineProgram;
+//    }
+//
     /**
      * @return Create and return a DocWorkUnit-derived object to handle documentation
      * for the target feature(s) represented by documentedFeature.
